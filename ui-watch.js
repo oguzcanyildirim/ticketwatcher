@@ -6,6 +6,7 @@ const TG_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 
 const ACTIVE_TEXT = (process.env.ACTIVE_TEXT || "biletini al").toLocaleLowerCase("tr-TR");
+const CITY_FILTER = process.env.CITY_FILTER || ""; // Boşsa tüm şehirler, değilse sadece o şehir (örn: "Ankara")
 const MAX_RUNTIME_MS = parseInt(process.env.MAX_RUNTIME_MS || "240000", 10); // 4 dakika
 const MIN_WAIT_MS = parseInt(process.env.MIN_WAIT_MS || "5000", 10);
 const MAX_WAIT_MS = parseInt(process.env.MAX_WAIT_MS || "8000", 10);
@@ -45,10 +46,21 @@ async function fetchPage(url) {
 
 function hasActiveSeanceButton(html) {
   const $ = cheerio.load(html);
-  const buttons = $("button.seanceSelect");
+
+  // Şehir filtresi varsa sadece o şehrin bölümüne bak
+  let buttons;
+  if (CITY_FILTER) {
+    const citySection = $(`.ed-biletler__sehir[data-sehir="${CITY_FILTER}"]`);
+    buttons = citySection.find("button.seanceSelect");
+  } else {
+    buttons = $("button.seanceSelect");
+  }
+
   const count = buttons.length;
 
   let active = false;
+  let activeSeances = [];
+
   buttons.each((_, el) => {
     const btn = $(el);
 
@@ -57,11 +69,15 @@ function hasActiveSeanceButton(html) {
     const text = btn.text().trim().toLocaleLowerCase("tr-TR");
     if (text.includes(ACTIVE_TEXT)) {
       active = true;
-      return false;
+      // Seans bilgisini al (tarih ve mekan)
+      const seanceDiv = btn.closest(".ed-biletler__sehir__gun");
+      const date = seanceDiv.find("time[itemprop='startDate']").text().trim();
+      const venue = seanceDiv.find("address[itemprop='name']").text().trim();
+      activeSeances.push({ date, venue });
     }
   });
 
-  return { active, count };
+  return { active, count, activeSeances };
 }
 
 (async () => {
@@ -70,19 +86,31 @@ function hasActiveSeanceButton(html) {
   const started = Date.now();
   console.log("Watching:", URL);
   console.log("ACTIVE_TEXT:", ACTIVE_TEXT);
+  console.log("CITY_FILTER:", CITY_FILTER || "(tüm şehirler)");
   console.log("MAX_RUNTIME_MS:", MAX_RUNTIME_MS);
 
   while (Date.now() - started < MAX_RUNTIME_MS) {
     try {
       const html = await fetchPage(URL);
-      const { active, count } = hasActiveSeanceButton(html);
+      const { active, count, activeSeances } = hasActiveSeanceButton(html);
 
-      console.log(`[${new Date().toLocaleTimeString()}] seanceSelect in HTML: ${count} | active: ${active}`);
+      const cityInfo = CITY_FILTER ? ` (${CITY_FILTER})` : "";
+      console.log(`[${new Date().toLocaleTimeString()}] seanceSelect${cityInfo}: ${count} | active: ${active}`);
 
       if (active) {
-        await sendTelegram(
-          `🎭 <b>Bilet Açıldı!</b>\n\n<a href="${URL}">Hemen Al →</a>`
-        );
+        let message = `🎭 <b>Bilet Açıldı!</b>`;
+        if (CITY_FILTER) {
+          message += `\n📍 Şehir: ${CITY_FILTER}`;
+        }
+        if (activeSeances.length > 0) {
+          message += `\n\n<b>Müsait Seanslar:</b>`;
+          activeSeances.forEach(s => {
+            message += `\n• ${s.date}${s.venue ? ` - ${s.venue}` : ""}`;
+          });
+        }
+        message += `\n\n<a href="${URL}">Hemen Al →</a>`;
+
+        await sendTelegram(message);
         console.log("Notified. Exiting.");
         process.exit(0);
       }
