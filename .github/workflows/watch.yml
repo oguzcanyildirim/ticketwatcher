@@ -12,7 +12,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
+    timeout-minutes: 6
     permissions:
       contents: read
     steps:
@@ -25,5 +25,8 @@ jobs:
         env:
           WATCH_URL: ${{ vars.WATCH_URL }}
           ACTIVE_TEXT: ${{ vars.ACTIVE_TEXT }}
+          MAX_RUNTIME_MS: "240000"
+          MIN_WAIT_MS: "5000"
+          MAX_WAIT_MS: "8000"
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
