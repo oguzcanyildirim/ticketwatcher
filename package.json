@@ -1,0 +1,21 @@
+{
+  "name": "ui-watch",
+  "version": "1.0.0",
+  "description": "Web sayfası izleme ve buton otomasyonu aracı",
+  "main": "ui-watch.js",
+  "bin": {
+    "ui-watch": "./ui-watch.js"
+  },
+  "scripts": {
+    "start": "node ui-watch.js"
+  },
+  "keywords": [
+    "automation",
+    "web-scraping",
+    "ticket-watcher"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "cheerio": "^1.1.2"
+  }
+}
