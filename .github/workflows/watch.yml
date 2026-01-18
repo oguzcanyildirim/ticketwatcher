@@ -25,6 +25,7 @@ jobs:
         env:
           WATCH_URL: ${{ vars.WATCH_URL }}
           ACTIVE_TEXT: ${{ vars.ACTIVE_TEXT }}
+          CITY_FILTER: ${{ vars.CITY_FILTER }}
           MAX_RUNTIME_MS: "240000"
           MIN_WAIT_MS: "5000"
           MAX_WAIT_MS: "8000"
