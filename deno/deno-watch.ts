@@ -1,16 +1,7 @@
 import * as cheerio from "npm:cheerio@1.1.2";
 
-const URL = Deno.env.get("WATCH_URL")!;
-const TG_TOKEN = Deno.env.get("TG_BOT_TOKEN");
-const TG_CHAT_ID = Deno.env.get("TG_CHAT_ID");
+const kvPromise = Deno.openKv();
 
-const ACTIVE_TEXT = normTR(Deno.env.get("ACTIVE_TEXT") ?? "biletini al");
-const CITY_FILTER = normTR(Deno.env.get("CITY_FILTER") ?? "");
-
-// dakikada 2 kontrol
-const SECOND_CHECK_DELAY_MS = 30_000;
-
-// duplicate engeli
 const DEDUPE_TTL_MS = 15 * 60 * 1000;
 
 function normTR(s: string) {
@@ -19,6 +10,15 @@ function normTR(s: string) {
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
+}
+
+function getConfig() {
+  const url = Deno.env.get("WATCH_URL") ?? "";
+  const tgToken = Deno.env.get("TG_BOT_TOKEN") ?? "";
+  const tgChatId = Deno.env.get("TG_CHAT_ID") ?? "";
+  const activeText = normTR(Deno.env.get("ACTIVE_TEXT") ?? "biletini al");
+  const cityFilter = normTR(Deno.env.get("CITY_FILTER") ?? "");
+  return { url, tgToken, tgChatId, activeText, cityFilter };
 }
 
 async function fetchPage(url: string) {
@@ -30,24 +30,12 @@ async function fetchPage(url: string) {
     },
   });
 
-  const server = res.headers.get("server") ?? "";
-  const cfRay = res.headers.get("cf-ray") ?? "";
-  console.log(`HTTP ${res.status} server=${server} cf-ray=${cfRay ? "yes" : "no"}`);
-
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-  const html = await res.text();
-
-  const low = html.toLowerCase();
-  if (low.includes("just a moment") || low.includes("cf-challenge") || low.includes("captcha")) {
-    console.log("Possible challenge page detected.");
-  }
-
-  return html;
+  return await res.text();
 }
 
-function pickButtons($: cheerio.CheerioAPI) {
-  if (!CITY_FILTER) return $("button.seanceSelect");
+function pickButtons($: cheerio.CheerioAPI, cityFilter: string) {
+  if (!cityFilter) return $("button.seanceSelect");
 
   const sections = $(".ed-biletler__sehir").filter((_, el) => {
     const attr = normTR($(el).attr("data-sehir") ?? "");
@@ -57,15 +45,15 @@ function pickButtons($: cheerio.CheerioAPI) {
         .first()
         .text(),
     );
-    return attr === CITY_FILTER || header.includes(CITY_FILTER);
+    return attr === cityFilter || header.includes(cityFilter);
   });
 
   return sections.find("button.seanceSelect");
 }
 
-function checkTickets(html: string) {
+function checkTickets(html: string, cityFilter: string, activeText: string) {
   const $ = cheerio.load(html);
-  const buttons = pickButtons($);
+  const buttons = pickButtons($, cityFilter);
 
   const activeSeances: Array<{ date: string; venue: string }> = [];
 
@@ -74,7 +62,7 @@ function checkTickets(html: string) {
     if (btn.attr("disabled")) return;
 
     const text = normTR(btn.text());
-    if (!text.includes(ACTIVE_TEXT)) return;
+    if (!text.includes(activeText)) return;
 
     const wrap = btn.closest(".ed-biletler__sehir__gun, .ed-biletler__gun, li, .card, .seans");
 
@@ -90,30 +78,25 @@ function checkTickets(html: string) {
   return { count: buttons.length, activeSeances };
 }
 
-async function wasNotifiedRecently(): Promise<boolean> {
-  const kv = await Deno.openKv();
-  const key = ["ticketwatch", URL, CITY_FILTER, ACTIVE_TEXT];
-  const existing = await kv.get<number>(key);
+async function wasNotifiedRecently(keyParts: unknown[]): Promise<boolean> {
+  const kv = await kvPromise;
+  const existing = await kv.get<number>(keyParts);
   return Boolean(existing.value);
 }
 
-async function markNotified(): Promise<void> {
-  const kv = await Deno.openKv();
-  const key = ["ticketwatch", URL, CITY_FILTER, ACTIVE_TEXT];
-  await kv.set(key, Date.now(), { expireIn: DEDUPE_TTL_MS });
+async function markNotified(keyParts: unknown[]): Promise<void> {
+  const kv = await kvPromise;
+  await kv.set(keyParts, Date.now(), { expireIn: DEDUPE_TTL_MS });
 }
 
-async function sendTelegram(message: string) {
-  if (!TG_TOKEN || !TG_CHAT_ID) {
-    console.log("Telegram disabled: missing TG_BOT_TOKEN or TG_CHAT_ID");
-    return;
-  }
+async function sendTelegram(tgToken: string, tgChatId: string, message: string) {
+  if (!tgToken || !tgChatId) return;
 
-  const res = await fetch(`https://api.telegram.org/bot${TG_TOKEN}/sendMessage`, {
+  const res = await fetch(`https://api.telegram.org/bot${tgToken}/sendMessage`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      chat_id: TG_CHAT_ID,
+      chat_id: tgChatId,
       text: message,
       parse_mode: "HTML",
       disable_web_page_preview: true,
@@ -125,66 +108,67 @@ async function sendTelegram(message: string) {
   if (!data.ok) throw new Error(`Telegram API error: ${JSON.stringify(data)}`);
 }
 
-function buildMessage(activeSeances: Array<{ date: string; venue: string }>) {
-  let msg = `🎭 <b>Bilet Açıldı</b>`;
-  if (CITY_FILTER) msg += `\n📍 ${CITY_FILTER}`;
+function buildMessage(url: string, cityFilter: string, activeSeances: Array<{ date: string; venue: string }>) {
+  let msg = `<b>Bilet Açıldı</b>`;
+  if (cityFilter) msg += `\nŞehir: ${cityFilter}`;
 
-  if (activeSeances.length > 0) {
+  if (activeSeances.length) {
     msg += `\n\n<b>Müsait Seanslar</b>`;
     for (const s of activeSeances) {
-      const line = s.venue ? `• ${s.date} | ${s.venue}` : `• ${s.date}`;
-      msg += `\n${line}`;
+      msg += `\n• ${s.date}${s.venue ? ` | ${s.venue}` : ""}`;
     }
   }
 
-  msg += `\n\n<a href="${URL}">Hemen Al</a>`;
+  msg += `\n\n${url}`;
   return msg;
 }
 
 async function runOnce() {
-  const html = await fetchPage(URL);
-  const { count, activeSeances } = checkTickets(html);
+  const { url, tgToken, tgChatId, activeText, cityFilter } = getConfig();
+
+  if (!url) {
+    console.log("WATCH_URL missing, skipping this run");
+    return;
+  }
+
+  const html = await fetchPage(url);
+  const { count, activeSeances } = checkTickets(html, cityFilter, activeText);
 
   console.log(
-    `[${new Date().toISOString()}] city=${CITY_FILTER || "all"} buttons=${count} active=${activeSeances.length > 0}`,
+    `[${new Date().toISOString()}] city=${cityFilter || "all"} buttons=${count} active=${activeSeances.length > 0}`,
   );
 
   if (activeSeances.length === 0) return;
 
-  if (await wasNotifiedRecently()) {
-    console.log("Duplicate prevented by KV.");
+  const key = ["ticketwatch", url, cityFilter, activeText];
+
+  if (await wasNotifiedRecently(key)) {
+    console.log("Duplicate prevented by KV");
     return;
   }
 
-  const msg = buildMessage(activeSeances);
-  await sendTelegram(msg);
-  await markNotified();
-  console.log("Notified.");
+  const msg = buildMessage(url, cityFilter, activeSeances);
+  await sendTelegram(tgToken, tgChatId, msg);
+  await markNotified(key);
+  console.log("Notified");
 }
-
-// Startup check
-if (!URL) {
-  console.error("WATCH_URL missing!");
-  Deno.exit(1);
-}
-
-console.log("🎬 ticket-watch started");
-console.log(`   URL: ${URL}`);
-console.log(`   CITY_FILTER: ${CITY_FILTER || "(all)"}`);
-console.log(`   ACTIVE_TEXT: ${ACTIVE_TEXT}`);
 
 Deno.cron("ticket-watch", "* * * * *", async () => {
-  try {
-    await runOnce();
-  } catch (err) {
-    console.error("Error (first check):", err);
-  }
+    const start = Date.now();
+  
+    while (Date.now() - start < 55_000) {
+      try {
+        await runOnce();
+      } catch (err) {
+        console.error("Error:", err);
+      }
+  
+      const min = 10_000;
+      const max = 14_000;
+      const wait = Math.floor(min + Math.random() * (max - min));
+      await sleep(wait);
+    }
+  });
 
-  await sleep(SECOND_CHECK_DELAY_MS);
-
-  try {
-    await runOnce();
-  } catch (err) {
-    console.error("Error (second check):", err);
-  }
-});
+// Workaround: HTTP handler ekle (cron-only projelerde deploy daha stabil oluyor)
+Deno.serve(() => new Response("ok"));
